@@ -1,50 +1,78 @@
-use candle_core::IndexOp;
-use candle_core::{Result, Tensor};
-use candle_nn::{Linear, Module, VarBuilder};
+use candle_core::{IndexOp, Result, Tensor};
+use candle_nn::{Activation, Linear, Module, VarBuilder};
 
-pub struct GcnLayer {
-    linear: Linear,
+use super::traits::GnnModule;
+
+pub struct GcnConv {
+    fc: Linear,
+    activation_fn: Option<Activation>,
 }
-
-impl GcnLayer {
-    pub fn new(input_dim: usize, output_dim: usize, vs: VarBuilder) -> Result<Self> {
+impl GcnConv {
+    pub fn new(
+        in_dim: usize,
+        out_dim: usize,
+        activation_fn: Option<Activation>,
+        vs: VarBuilder,
+    ) -> Result<Self> {
         Ok(Self {
-            linear: candle_nn::linear(input_dim, output_dim, vs.pp("linear"))?,
+            fc: candle_nn::linear(in_dim, out_dim, vs.pp("fc"))?,
+            activation_fn,
         })
     }
-    pub fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
-        let degree = Tensor::ones((x.shape().dims()[0],), x.dtype(), x.device())?;
-        let degree = degree.index_add(
-            &edge_index.i((0, ..))?,
-            &edge_index.i((1, ..))?.ones_like()?.to_dtype(x.dtype())?,
-            0,
-        )?;
-        let degree = degree.reshape((x.shape().dims()[0], 1))?;
+}
+impl GnnModule for GcnConv {
+    fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
+        let num_nodes = x.shape().dims()[0];
+        let num_edges = edge_index.shape().dims()[1];
+        let source = edge_index.i((0, ..))?;
+        let target = edge_index.i((1, ..))?;
 
-        let x = x.zeros_like()?.index_add(
+        let h = self.fc.forward(&x)?;
+        let deg = Tensor::ones((num_nodes, 1), h.dtype(), h.device())?
+            .index_add(
+                &source,
+                &Tensor::ones((num_edges, 1), h.dtype(), h.device())?,
+                0,
+            )?
+            .powf(-0.5)?;
+        let edge_weight = deg.i(&source)?.mul(&deg.i(&target)?)?;
+
+        let h = h.index_add(
             &edge_index.i((0, ..))?,
-            &x.i(&edge_index.i((1, ..))?)?,
+            &h.i(&edge_index.i((1, ..))?)?.broadcast_mul(&edge_weight)?,
             0,
         )?;
-        let x = x.broadcast_div(&degree)?;
-        let x = self.linear.forward(&x)?;
-        let x = x.relu()?;
-        Ok(x)
+        if let Some(a) = self.activation_fn {
+            a.forward(&h)
+        } else {
+            Ok(h)
+        }
     }
 }
 pub struct Gcn {
-    layers: Vec<GcnLayer>,
+    layers: Vec<GcnConv>,
 }
 impl Gcn {
-    pub fn new(sizes: &[usize], vs: VarBuilder) -> Result<Self> {
+    pub fn new(layer_sizes: &[usize], vs: VarBuilder) -> Result<Self> {
         let mut layers = Vec::new();
-        for i in 1..sizes.len() {
+        for i in 0..layer_sizes.len() - 1 {
             let name = format!("layer_{}", i);
-            layers.push(GcnLayer::new(sizes[i - 1], sizes[i], vs.pp(name))?);
+            layers.push(GcnConv::new(
+                layer_sizes[i],
+                layer_sizes[i + 1],
+                if i + 1 < layer_sizes.len() {
+                    Some(Activation::Relu)
+                } else {
+                    None
+                },
+                vs.pp(name),
+            )?);
         }
         Ok(Self { layers })
     }
-    pub fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
+}
+impl GnnModule for Gcn {
+    fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
         let mut h = x.clone();
         for layer in &self.layers {
             h = layer.forward(&h, edge_index)?;
