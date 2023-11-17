@@ -28,7 +28,7 @@ pub struct Cora {
 impl Cora {
     pub fn from_file<P: AsRef<Path>>(cora_npz: P, device: &Device) -> anyhow::Result<Self> {
         let mut hashmap: HashMap<String, Tensor> =
-            HashMap::from_iter(Tensor::read_npz(cora_npz.as_ref())?.into_iter());
+            HashMap::from_iter(Tensor::read_npz(cora_npz.as_ref())?);
         Ok(Self {
             x: hashmap.remove("x").unwrap().to_device(device)?,
             edge_index: hashmap

@@ -57,10 +57,10 @@ fn main() -> anyhow::Result<()> {
     let device = Device::cuda_if_available(0)?;
 
     let cora = Cora::from_file("datasets/cora.npz", &device)?;
-    if true {
+    if false {
         let varmap = VarMap::new();
         let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
-        let gnn = Gcn::new(&[1433, 16, 7], vs.pp("gcn"))?;
+        let gnn = Gcn::new(&[1433, 16, 16, 7], vs.pp("gcn"))?;
         train_evaluate(&cora, gnn, varmap, "GCN")?;
     }
     if false {
@@ -69,10 +69,10 @@ fn main() -> anyhow::Result<()> {
         let gnn = Gin::new(&[1433, 16, 7], vs.pp("gin"))?;
         train_evaluate(&cora, gnn, varmap, "GIN")?;
     }
-    if false {
+    if true {
         let varmap = VarMap::new();
         let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
-        let gnn = Gat::new(&[1433, 128, 7], &[8, 1], vs.pp("gat"))?;
+        let gnn = Gat::new(&[1433, 16, 7], &[4, 1], vs.pp("gat"))?;
         train_evaluate(&cora, gnn, varmap, "GAT")?;
     }
     Ok(())

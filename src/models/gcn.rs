@@ -1,11 +1,11 @@
 use candle_core::{IndexOp, Result, Tensor};
-use candle_nn::{Activation, Linear, Module, VarBuilder};
+use candle_nn::{Activation, Init, Module, VarBuilder};
 
-use super::utils::linear;
 use super::traits::GnnModule;
 
 pub struct GcnConv {
-    fc: Linear,
+    weight: Tensor,
+    bias: Tensor,
     activation_fn: Option<Activation>,
 }
 impl GcnConv {
@@ -15,8 +15,19 @@ impl GcnConv {
         activation_fn: Option<Activation>,
         vs: VarBuilder,
     ) -> Result<Self> {
+        let bound = 1.0 / (in_dim as f64).sqrt();
+        let weight = vs.get_with_hints(
+            (in_dim, out_dim),
+            "weight",
+            Init::Uniform {
+                lo: -bound,
+                up: bound,
+            },
+        )?;
+        let bias = vs.get_with_hints((1, out_dim), "bias", Init::Const(0.0))?;
         Ok(Self {
-            fc: linear(in_dim, out_dim, vs.pp("fc"))?,
+            weight,
+            bias,
             activation_fn,
         })
     }
@@ -28,7 +39,7 @@ impl GnnModule for GcnConv {
         let source = edge_index.i((0, ..))?;
         let target = edge_index.i((1, ..))?;
 
-        let h = self.fc.forward(&x)?;
+        let h = x.matmul(&self.weight)?;
         let deg = Tensor::ones((num_nodes, 1), h.dtype(), h.device())?
             .index_add(
                 &source,
@@ -38,11 +49,13 @@ impl GnnModule for GcnConv {
             .powf(0.5)?;
         let edge_weight = deg.i(&source)?.mul(&deg.i(&target)?)?;
 
-        let h = h.index_add(
-            &edge_index.i((0, ..))?,
-            &h.i(&target)?.broadcast_div(&edge_weight)?,
-            0,
-        )?;
+        let h = h
+            .index_add(
+                &edge_index.i((0, ..))?,
+                &h.i(&target)?.broadcast_div(&edge_weight)?,
+                0,
+            )?
+            .broadcast_add(&self.bias)?;
         if let Some(a) = self.activation_fn {
             a.forward(&h)
         } else {
@@ -62,7 +75,7 @@ impl Gcn {
                 layer_sizes[i],
                 layer_sizes[i + 1],
                 if i + 1 < layer_sizes.len() {
-                    Some(Activation::default())
+                    Some(Activation::Relu)
                 } else {
                     None
                 },
