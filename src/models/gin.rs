@@ -1,12 +1,13 @@
 use candle_core::{Result, Tensor, IndexOp};
-use candle_nn::{Linear, Module, VarBuilder};
+use candle_nn::{Linear, Module, VarBuilder, Activation};
 
+use super::utils::linear;
 use super::traits::GnnModule;
 
 struct Mlp {
     fc1: Linear,
-    activation_fn: candle_nn::Activation,
     fc2: Linear,
+    activation_fn: Activation,
 }
 impl Module for Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
@@ -15,24 +16,20 @@ impl Module for Mlp {
 }
 pub struct GinConv {
     nn: Box<dyn Module>,
-    eps: Tensor,
 }
 impl GinConv {
-    pub fn new(nn: Box<dyn Module>, vs: VarBuilder) -> Result<Self> {
-        Ok(Self {
-            nn,
-            eps: vs.get_with_hints((1,), "eps", candle_nn::init::Init::Const(0.0))?,
-        })
+    pub fn new(nn: Box<dyn Module>, _vs: VarBuilder) -> Result<Self> {
+        Ok(Self { nn })
     }
 }
 impl GnnModule for GinConv {
     fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
-        let x = x.broadcast_mul(&(1.0 + &self.eps)?)?.index_add(
+        let out = x.index_add(
             &edge_index.i((0, ..))?,
             &x.i(&edge_index.i((1, ..))?)?,
             0,
         )?;
-        self.nn.forward(&x)
+        self.nn.forward(&out)
     }
 }
 pub struct Gin {
@@ -43,14 +40,13 @@ impl Gin {
         let mut layers = Vec::new();
         for i in 1..sizes.len() {
             let name = format!("layer_{}", i);
-            let vs = vs.pp(name);
-            let hidden_dim = (sizes[i] + sizes[i-1]) / 2;
+            let vs_sub = vs.pp(name);
             let mlp = Mlp {
-                fc1: candle_nn::linear(sizes[i-1], hidden_dim, vs.pp("fc1"))?,
-                activation_fn: candle_nn::Activation::Relu,
-                fc2: candle_nn::linear(hidden_dim, sizes[i], vs.pp("fc2"))?,
+                fc1: linear(sizes[i-1], sizes[i], vs_sub.pp("fc1"))?,
+                fc2: linear(sizes[i], sizes[i], vs_sub.pp("fc2"))?,
+                activation_fn: Activation::Relu,
             };
-            layers.push(GinConv::new(Box::new(mlp), vs)?);
+            layers.push(GinConv::new(Box::new(mlp), vs_sub)?);
         }
         Ok(Self { layers })
     }
@@ -64,4 +60,3 @@ impl GnnModule for Gin {
         Ok(h)
     }
 }
-

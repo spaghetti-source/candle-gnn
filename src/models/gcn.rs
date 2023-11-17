@@ -1,6 +1,7 @@
 use candle_core::{IndexOp, Result, Tensor};
 use candle_nn::{Activation, Linear, Module, VarBuilder};
 
+use super::utils::linear;
 use super::traits::GnnModule;
 
 pub struct GcnConv {
@@ -15,7 +16,7 @@ impl GcnConv {
         vs: VarBuilder,
     ) -> Result<Self> {
         Ok(Self {
-            fc: candle_nn::linear(in_dim, out_dim, vs.pp("fc"))?,
+            fc: linear(in_dim, out_dim, vs.pp("fc"))?,
             activation_fn,
         })
     }
@@ -34,12 +35,12 @@ impl GnnModule for GcnConv {
                 &Tensor::ones((num_edges, 1), h.dtype(), h.device())?,
                 0,
             )?
-            .powf(-0.5)?;
+            .powf(0.5)?;
         let edge_weight = deg.i(&source)?.mul(&deg.i(&target)?)?;
 
         let h = h.index_add(
             &edge_index.i((0, ..))?,
-            &h.i(&edge_index.i((1, ..))?)?.broadcast_mul(&edge_weight)?,
+            &h.i(&target)?.broadcast_div(&edge_weight)?,
             0,
         )?;
         if let Some(a) = self.activation_fn {
@@ -61,7 +62,7 @@ impl Gcn {
                 layer_sizes[i],
                 layer_sizes[i + 1],
                 if i + 1 < layer_sizes.len() {
-                    Some(Activation::Relu)
+                    Some(Activation::default())
                 } else {
                     None
                 },

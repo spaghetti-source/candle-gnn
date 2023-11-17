@@ -1,5 +1,6 @@
 mod traits;
 pub use traits::GnnModule;
+mod utils;
 
 mod gcn;
 pub use gcn::{Gcn, GcnConv};
