@@ -1,21 +1,19 @@
 use candle_core::{IndexOp, Result, Tensor};
-use candle_nn::{Activation, Init, Module, VarBuilder};
+use candle_nn::{Activation, Dropout, Init, Linear, Module, VarBuilder};
 
-use super::traits::GnnModule;
+use super::{
+    traits::GnnModule,
+    utils::{in_degree, out_degree, weighted_sum_agg},
+};
 
 pub struct GcnConv {
     weight: Tensor,
     bias: Tensor,
-    activation_fn: Option<Activation>,
 }
 impl GcnConv {
-    pub fn new(
-        in_dim: usize,
-        out_dim: usize,
-        activation_fn: Option<Activation>,
-        vs: VarBuilder,
-    ) -> Result<Self> {
-        let bound = 1.0 / (in_dim as f64).sqrt();
+    pub fn new(in_dim: usize, out_dim: usize, vs: VarBuilder) -> Result<Self> {
+        // Xavier Uniform
+        let bound = (6.0 / (in_dim + out_dim) as f64).sqrt();
         let weight = vs.get_with_hints(
             (in_dim, out_dim),
             "weight",
@@ -25,70 +23,66 @@ impl GcnConv {
             },
         )?;
         let bias = vs.get_with_hints((1, out_dim), "bias", Init::Const(0.0))?;
-        Ok(Self {
-            weight,
-            bias,
-            activation_fn,
-        })
+        Ok(Self { weight, bias })
     }
 }
 impl GnnModule for GcnConv {
-    fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
-        let num_nodes = x.shape().dims()[0];
-        let num_edges = edge_index.shape().dims()[1];
-        let source = edge_index.i((0, ..))?;
-        let target = edge_index.i((1, ..))?;
-
-        let h = x.matmul(&self.weight)?;
-        let deg = Tensor::ones((num_nodes, 1), h.dtype(), h.device())?
-            .index_add(
-                &source,
-                &Tensor::ones((num_edges, 1), h.dtype(), h.device())?,
-                0,
-            )?
+    fn forward(&self, xs: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
+        let out_degree = out_degree(edge_index)?;
+        let in_degree = in_degree(edge_index)?;
+        let edge_weight = out_degree
+            .i(&edge_index.i((0, ..))?)?
+            .mul(&in_degree.i(&edge_index.i((1, ..))?)?)?
+            .to_dtype(xs.dtype())?
             .powf(0.5)?;
-        let edge_weight = deg.i(&source)?.mul(&deg.i(&target)?)?;
-
-        let h = h
-            .index_add(
-                &edge_index.i((0, ..))?,
-                &h.i(&target)?.broadcast_div(&edge_weight)?,
-                0,
-            )?
-            .broadcast_add(&self.bias)?;
-        if let Some(a) = self.activation_fn {
-            a.forward(&h)
-        } else {
-            Ok(h)
+        let xs = xs.matmul(&self.weight)?;
+        weighted_sum_agg(&xs, edge_index, &edge_weight, &xs)?.broadcast_add(&self.bias)
+    }
+}
+pub struct GcnParams {
+    pub dropout_rate: f32,
+    pub activation_fn: Activation,
+}
+impl Default for GcnParams {
+    fn default() -> Self {
+        Self {
+            dropout_rate: 0.0,
+            activation_fn: Activation::Relu,
         }
     }
 }
 pub struct Gcn {
     layers: Vec<GcnConv>,
+    dropout: Dropout,
+    activation_fn: Activation,
 }
 impl Gcn {
-    pub fn new(layer_sizes: &[usize], vs: VarBuilder) -> Result<Self> {
+    pub fn with_params(layer_sizes: &[usize], params: GcnParams, vs: VarBuilder) -> Result<Self> {
         let mut layers = Vec::new();
         for i in 0..layer_sizes.len() - 1 {
             let name = format!("layer_{}", i);
             layers.push(GcnConv::new(
                 layer_sizes[i],
                 layer_sizes[i + 1],
-                if i + 1 < layer_sizes.len() {
-                    Some(Activation::Relu)
-                } else {
-                    None
-                },
                 vs.pp(name),
             )?);
         }
-        Ok(Self { layers })
+        Ok(Self {
+            layers,
+            dropout: Dropout::new(params.dropout_rate),
+            activation_fn: params.activation_fn,
+        })
+    }
+    pub fn new(layer_sizes: &[usize], vs: VarBuilder) -> Result<Self> {
+        Self::with_params(layer_sizes, GcnParams::default(), vs)
     }
 }
 impl GnnModule for Gcn {
-    fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
-        let mut h = x.clone();
-        for layer in &self.layers {
+    fn forward_t(&self, x: &Tensor, edge_index: &Tensor, train: bool) -> Result<Tensor> {
+        let mut h = self.layers[0].forward(x, edge_index)?;
+        for layer in &self.layers[1..] {
+            h = self.dropout.forward(&h, train)?;
+            h = self.activation_fn.forward(&h)?;
             h = layer.forward(&h, edge_index)?;
         }
         Ok(h)

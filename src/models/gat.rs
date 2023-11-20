@@ -1,5 +1,5 @@
 use candle_core::{IndexOp, Result, Tensor, D};
-use candle_nn::{ops, Activation, Init, Module, VarBuilder};
+use candle_nn::{ops, Activation, Init, Module, VarBuilder, Dropout};
 
 use super::traits::GnnModule;
 
@@ -12,7 +12,6 @@ pub struct GatConv {
     weight: Tensor,
     att_src: Tensor,
     att_dst: Tensor,
-    activation_fn: Option<Activation>,
 }
 impl GatConv {
     pub fn new(
@@ -21,7 +20,6 @@ impl GatConv {
         num_heads: usize,
         negative_slope: f64,
         dropout: f32,
-        activation_fn: Option<Activation>,
         vs: VarBuilder,
     ) -> Result<Self> {
         assert!(out_dim % num_heads == 0);
@@ -43,7 +41,6 @@ impl GatConv {
             num_heads,
             negative_slope,
             dropout,
-            activation_fn,
         })
     }
 }
@@ -74,23 +71,39 @@ impl GnnModule for GatConv {
             ops::dropout(&a_edge.broadcast_div(&a_sum.i(&source)?)?, self.dropout)
         }?;
 
-        let h = h
-            .zeros_like()?
+        h.zeros_like()?
             .index_add(&source, &h.i(&target)?.broadcast_mul(&attention)?, 0)?
-            .reshape(&[num_nodes, self.out_dim])?;
+            .reshape(&[num_nodes, self.out_dim])
+    }
+}
 
-        if let Some(a) = self.activation_fn {
-            a.forward(&h)
-        } else {
-            Ok(h)
+pub struct GatParams {
+    dropout_rate: f32,
+    attention_dropout_rate: f64,
+    attention_negative_slope: f32,
+    activation_fn: Activation,
+}
+impl Default for GatParams {
+    fn default() -> Self {
+        Self {
+            dropout_rate: 0.0,
+            attention_dropout_rate: 0.0,
+            attention_negative_slope: 0.1,
+            activation_fn: Default::default(),
         }
     }
 }
+
 pub struct Gat {
     layers: Vec<GatConv>,
+    dropout: Dropout,
+    activation_fn: Activation,
 }
 impl Gat {
     pub fn new(sizes: &[usize], heads: &[usize], vs: VarBuilder) -> Result<Self> {
+        Self::with_params(sizes, heads, GatParams::default(), vs)
+    }
+    pub fn with_params(sizes: &[usize], heads: &[usize], params: GatParams, vs: VarBuilder) -> Result<Self> {
         let mut layers = Vec::new();
         for i in 0..sizes.len() - 1 {
             let name = format!("layer_{}", i);
@@ -98,23 +111,24 @@ impl Gat {
                 sizes[i],
                 sizes[i + 1],
                 heads[i],
-                0.0,
-                0.1,
-                if i + 1 < sizes.len() {
-                    Some(Activation::Relu)
-                } else {
-                    None
-                },
+                params.attention_dropout_rate,
+                params.attention_negative_slope,
                 vs.pp(name),
             )?);
         }
-        Ok(Self { layers })
+        Ok(Self { 
+            layers,
+            dropout: Dropout::new(params.dropout_rate),
+            activation_fn: params.activation_fn,
+        })
     }
 }
 impl GnnModule for Gat {
-    fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
-        let mut h = x.clone();
-        for layer in &self.layers {
+    fn forward_t(&self, x: &Tensor, edge_index: &Tensor, train: bool) -> Result<Tensor> {
+        let mut h = self.layers[0].forward(x, edge_index)?;
+        for layer in &self.layers[1..] {
+            h = self.dropout.forward(&h, train)?;
+            h = self.activation_fn.forward(&h)?;
             h = layer.forward(&h, edge_index)?;
         }
         Ok(h)

@@ -7,5 +7,5 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.75"
-candle-core = "0.3.1"
-candle-nn = "0.3.1"
+candle-core = { git = "https://github.com/huggingface/candle.git" }
+candle-nn = { git = "https://github.com/huggingface/candle.git" }
