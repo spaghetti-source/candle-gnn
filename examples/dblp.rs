@@ -3,11 +3,10 @@
 #![allow(dead_code)]
 
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
-use candle_gnn::models::{hetero_gcn, HeteroGcnConv};
 use candle_nn::{linear, loss, ops, Init, Linear, Optimizer, VarBuilder, VarMap};
 
 use candle_gnn::datasets::{Dblp, EdgeType, NodeType};
-use candle_gnn::models::utils::apply;
+use candle_gnn::nn::{hetero_gcn, HeteroGcnConv, HeteroGnnModule, utils::apply};
 use candle_gnn::utils::mask_to_index;
 
 use EdgeType::*;

@@ -5,7 +5,7 @@ use candle_core::{DType, Device, IndexOp, D, Result, Tensor};
 use candle_nn::{loss, Optimizer, VarBuilder, VarMap, Activation, Module, Dropout};
 
 use candle_gnn::datasets::Cora;
-use candle_gnn::models::{Gat, Gcn, Gin, GnnModule};
+use candle_gnn::nn::{Gat, Gcn, Gin, GnnModule};
 
 fn train_evaluate<G: GnnModule>(cora: &Cora, gnn: G, varmap: VarMap, name: &str) -> anyhow::Result<()> {
     let num_epochs = 100;

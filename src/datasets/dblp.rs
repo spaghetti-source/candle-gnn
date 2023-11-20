@@ -39,6 +39,8 @@ pub struct Dblp {
     pub val_mask: Tensor,
     pub test_mask: Tensor,
     pub edge_index: std::collections::HashMap<(NodeType, EdgeType, NodeType), Tensor>,
+    // pub node_types: [NodeType; 4],
+    // pub edge_types: [(NodeType, EdgeType, NodeType); 6],
 }
 impl Dblp {
     /// As the conference nodes have no features, we add one-hot vectors.
