@@ -48,7 +48,7 @@ where
 pub fn out_degree_with_size(edge_index: &Tensor, size: usize) -> Result<Tensor> {
     let dtype = edge_index.dtype();
     let device = edge_index.device();
-    Tensor::zeros((size, 1), dtype, device)?.index_add(
+    Tensor::zeros((size,), dtype, device)?.index_add(
         &edge_index.i((0, ..))?,
         &edge_index.i((1, ..))?.ones_like()?,
         0,
@@ -63,8 +63,7 @@ pub fn out_degree(edge_index: &Tensor) -> Result<Tensor> {
 pub fn in_degree_with_size(edge_index: &Tensor, size: usize) -> Result<Tensor> {
     let dtype = edge_index.dtype();
     let device = edge_index.device();
-    let n = 1 + edge_index.i((1, ..))?.max(D::Minus1)?.to_scalar::<u32>()? as usize;
-    Tensor::zeros((n, 1), dtype, device)?.index_add(
+    Tensor::zeros((size,), dtype, device)?.index_add(
         &edge_index.i((1, ..))?,
         &edge_index.i((0, ..))?.ones_like()?,
         0,
@@ -82,7 +81,7 @@ pub fn mean_agg(xs: &Tensor, edge_index: &Tensor, out: &Tensor) -> Result<Tensor
     let device = xs.device();
     let n = out.shape().dims()[0];
     let m = edge_index.shape().dims()[1];
-    let out_degree = out_degree(edge_index)?.to_dtype(xs.dtype())?;
+    let out_degree = out_degree(edge_index)?.to_dtype(xs.dtype())?.unsqueeze(1)?;
     out.index_add(
         &edge_index.i((0, ..))?,
         &xs.i(&edge_index.i((1, ..))?)?

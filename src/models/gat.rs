@@ -1,5 +1,5 @@
 use candle_core::{IndexOp, Result, Tensor, D};
-use candle_nn::{ops, Activation, Init, Module, VarBuilder, Dropout};
+use candle_nn::{ops, Activation, Dropout, Init, Module, VarBuilder};
 
 use super::traits::GnnModule;
 
@@ -45,7 +45,7 @@ impl GatConv {
     }
 }
 impl GnnModule for GatConv {
-    fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
+    fn forward_t(&self, x: &Tensor, edge_index: &Tensor, train: bool) -> Result<Tensor> {
         assert_eq!(x.shape().rank(), 2);
         assert_eq!(x.shape().dims()[1], self.in_dim);
         let hidden_dim = self.out_dim / self.num_heads;
@@ -103,7 +103,12 @@ impl Gat {
     pub fn new(sizes: &[usize], heads: &[usize], vs: VarBuilder) -> Result<Self> {
         Self::with_params(sizes, heads, GatParams::default(), vs)
     }
-    pub fn with_params(sizes: &[usize], heads: &[usize], params: GatParams, vs: VarBuilder) -> Result<Self> {
+    pub fn with_params(
+        sizes: &[usize],
+        heads: &[usize],
+        params: GatParams,
+        vs: VarBuilder,
+    ) -> Result<Self> {
         let mut layers = Vec::new();
         for i in 0..sizes.len() - 1 {
             let name = format!("layer_{}", i);
@@ -116,7 +121,7 @@ impl Gat {
                 vs.pp(name),
             )?);
         }
-        Ok(Self { 
+        Ok(Self {
             layers,
             dropout: Dropout::new(params.dropout_rate),
             activation_fn: params.activation_fn,

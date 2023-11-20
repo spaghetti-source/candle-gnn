@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use candle_core::{IndexOp, Result, Tensor};
+use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{
     batch_norm, Activation, BatchNorm, BatchNormConfig, Dropout, Init, Linear, Module, ModuleT,
-    VarBuilder,
+    VarBuilder, VarMap,
 };
 
-use super::utils::{apply, mean_agg};
+use super::{
+    utils::{apply, mean_agg},
+    HeteroGnnModule,
+};
 
 /// https://arxiv.org/pdf/1703.06103.pdf
 /// - Relation-Based Transformation
@@ -103,12 +106,12 @@ pub struct HeteroGcn<NodeType, EdgeType> {
     dropout: Dropout,
     first_activation: bool,
 }
-impl<NodeType, EdgeType> HeteroGcn<NodeType, EdgeType>
+impl<NodeType, EdgeType> HeteroGnnModule<NodeType, EdgeType> for HeteroGcn<NodeType, EdgeType>
 where
     NodeType: Clone + Eq + Hash + ToString,
     EdgeType: Clone + Eq + Hash + ToString,
 {
-    pub fn forward_t(
+    fn forward_t(
         &self,
         xs: &HashMap<NodeType, Tensor>,
         edge_index: &HashMap<(NodeType, EdgeType, NodeType), Tensor>,
@@ -154,4 +157,39 @@ where
         dropout: Dropout::new(0.1),
         first_activation: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hetero_gcn() -> Result<()> {
+        let device = Device::cuda_if_available(0)?;
+        let varmap = VarMap::new();
+        let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let model = hetero_gcn(
+            &[&[('a', 1), ('b', 2)], &[('a', 3), ('b', 4)]],
+            &[('a', 'x', 'b'), ('b', 'y', 'a')],
+            vs.pp("gcn"),
+        )?;
+        let xs = HashMap::from([
+            ('a', Tensor::randn(0f32, 1f32, (5, 1), &device)?),
+            ('b', Tensor::randn(0f32, 1f32, (6, 2), &device)?),
+        ]);
+        let edge_index = HashMap::from([
+            (
+                ('a', 'x', 'b'),
+                Tensor::from_slice(&[0u32, 1u32], (2, 1), &device)?,
+            ),
+            (
+                ('b', 'y', 'a'),
+                Tensor::from_slice(&[2u32, 3u32], (2, 1), &device)?,
+            ),
+        ]);
+        let output = model.forward(&xs, &edge_index)?;
+        assert_eq!(output[&'a'].shape().dims(), &[5, 3]);
+        assert_eq!(output[&'b'].shape().dims(), &[6, 4]);
+        Ok(())
+    }
 }

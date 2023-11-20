@@ -27,7 +27,7 @@ impl GcnConv {
     }
 }
 impl GnnModule for GcnConv {
-    fn forward(&self, xs: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
+    fn forward_t(&self, xs: &Tensor, edge_index: &Tensor, _train: bool) -> Result<Tensor> {
         let out_degree = out_degree(edge_index)?;
         let in_degree = in_degree(edge_index)?;
         let edge_weight = out_degree

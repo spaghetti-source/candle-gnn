@@ -95,7 +95,7 @@ impl Gin {
     }
 }
 impl GnnModule for Gin {
-    fn forward(&self, x: &Tensor, edge_index: &Tensor) -> Result<Tensor> {
+    fn forward_t(&self, x: &Tensor, edge_index: &Tensor, _train: bool) -> Result<Tensor> {
         let mut h = x.clone();
         for layer in &self.layers {
             h = layer.forward(&h, edge_index)?;
