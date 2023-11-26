@@ -1,5 +1,11 @@
+use std::{
+    fs::{create_dir_all, File},
+    path::{Path, PathBuf},
+};
+
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
+use zip::ZipArchive;
 
 #[allow(dead_code)]
 pub struct RemoteFile {
@@ -53,4 +59,27 @@ impl std::io::Read for RemoteFile {
         self.update(size);
         Ok(size)
     }
+}
+
+pub fn download_and_extract<P: AsRef<Path>>(
+    url: &str,
+    target_files: &[&str],
+    path: P,
+) -> Result<Vec<PathBuf>> {
+    let mut remote_file = RemoteFile::with_pbar(url)?;
+    let mut archive = tempfile::tempfile()?;
+    std::io::copy(&mut remote_file, &mut archive)?;
+
+    let mut archive = ZipArchive::new(archive)?;
+    let mut result = Vec::new();
+    for &filename in target_files.iter() {
+        let local_path = path.as_ref().join(filename);
+        if let Some(p) = local_path.parent() {
+            create_dir_all(p)?;
+        }
+        let mut local_file = File::create(&local_path)?;
+        std::io::copy(&mut archive.by_name(filename)?, &mut local_file)?;
+        result.push(local_path);
+    }
+    Ok(result)
 }

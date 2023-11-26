@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{
-    batch_norm, Activation, BatchNorm, BatchNormConfig, Dropout, Init, Linear, Module, ModuleT,
-    VarBuilder, VarMap,
-};
+use candle_core::{Result, Tensor};
+use candle_nn::{Activation, Dropout, Init, Module, VarBuilder};
 
 use super::{
     utils::{apply, mean_agg},
@@ -161,6 +158,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use candle_core::{DType, Device};
+    use candle_nn::VarMap;
+
     use super::*;
 
     #[test]

@@ -45,7 +45,7 @@ impl GatConv {
     }
 }
 impl GnnModule for GatConv {
-    fn forward_t(&self, x: &Tensor, edge_index: &Tensor, train: bool) -> Result<Tensor> {
+    fn forward_t(&self, x: &Tensor, edge_index: &Tensor, _train: bool) -> Result<Tensor> {
         assert_eq!(x.shape().rank(), 2);
         assert_eq!(x.shape().dims()[1], self.in_dim);
         let hidden_dim = self.out_dim / self.num_heads;

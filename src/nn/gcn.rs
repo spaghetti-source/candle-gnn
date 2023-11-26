@@ -1,5 +1,5 @@
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{Activation, Dropout, Init, Linear, Module, VarBuilder, VarMap};
+use candle_nn::{Activation, Dropout, Init, Module, VarBuilder, VarMap};
 
 use super::{
     traits::GnnModule,

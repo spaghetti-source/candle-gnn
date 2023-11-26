@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{IndexOp, Result, Tensor, D};
 use candle_nn::{Init, Linear, VarBuilder};
 
 //
@@ -77,10 +77,6 @@ pub fn in_degree(edge_index: &Tensor) -> Result<Tensor> {
 }
 
 pub fn mean_agg(xs: &Tensor, edge_index: &Tensor, out: &Tensor) -> Result<Tensor> {
-    let dtype = xs.dtype();
-    let device = xs.device();
-    let n = out.shape().dims()[0];
-    let m = edge_index.shape().dims()[1];
     let out_degree = out_degree(edge_index)?.to_dtype(xs.dtype())?.unsqueeze(1)?;
     out.index_add(
         &edge_index.i((0, ..))?,

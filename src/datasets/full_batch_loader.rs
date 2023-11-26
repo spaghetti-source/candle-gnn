@@ -1,5 +1,5 @@
 use super::traits::Dataset;
-use candle_core::{DType, Device};
+use candle_core::Device;
 
 pub struct FullBatchLoader<'a, T> {
     done: bool,

@@ -7,8 +7,7 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 
 fn main() -> Result<()> {
     let device = Device::cuda_if_available(0)?;
-
-    let dataset = CoraDataset::new("../datasets/cora")?;
+    let dataset = CoraDataset::new("datasets/cora")?;
     let [train_dataset, test_dataset] = dataset.random_split([0.8, 0.2])?;
 
     let model = Gcn::new(

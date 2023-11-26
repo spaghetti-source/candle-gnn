@@ -1,4 +1,4 @@
-use candle_core::{IndexOp, Result, Tensor};
+use candle_core::{Result, Tensor};
 use candle_nn::{
     batch_norm, Activation, BatchNorm, BatchNormConfig, Dropout, Linear, Module, ModuleT,
     VarBuilder,

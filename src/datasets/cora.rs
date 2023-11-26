@@ -1,20 +1,23 @@
 use std::{
-    fs::File,
+    fs::{create_dir_all, File},
     io::{BufRead, BufReader},
-    ops::BitAnd,
     path::Path,
 };
 
-use ::zip::ZipArchive;
 use anyhow::Result;
 use candle_core::{Device, Tensor};
-use polars::prelude::{
-    df, ChunkCompare, DataFrame, DataFrameJoinOps, Float32Chunked, NamedFrom, NamedFromOwned,
-    Series,
+use polars::{
+    chunked_array::ops::ChunkFull,
+    datatypes::BooleanChunked,
+    io::{
+        parquet::{ParquetReader, ParquetWriter},
+        SerReader,
+    },
+    prelude::{df, DataFrame, DataFrameJoinOps, NamedFrom, NamedFromOwned, Series},
 };
 
-use super::utils::RemoteFile;
-use super::{traits::Dataset, RandomSplit};
+use super::traits::Dataset;
+use super::{download_and_extract, PolarsDataset};
 
 #[derive(Debug, Clone)]
 pub struct CoraBatch {
@@ -24,170 +27,129 @@ pub struct CoraBatch {
     pub mask: Tensor, // loss(&logits.i(mask)?, &ys)
 }
 
-#[derive(Copy, Clone, Debug, Default)]
-pub enum EdgeDirection {
-    Forward,
-    Reverse,
-    #[default]
-    Both,
-}
-impl EdgeDirection {
-    pub fn has_forward_edges(&self) -> bool {
-        match self {
-            EdgeDirection::Forward => true,
-            EdgeDirection::Reverse => false,
-            EdgeDirection::Both => true,
-        }
-    }
-    pub fn has_reverse_edges(&self) -> bool {
-        match self {
-            EdgeDirection::Forward => true,
-            EdgeDirection::Reverse => false,
-            EdgeDirection::Both => true,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct CoraDataset {
     node_df: DataFrame,
-    feature_cols: Vec<String>,
     edge_df: DataFrame,
 }
 impl CoraDataset {
-    pub fn new<P: AsRef<Path>>(root: P) -> anyhow::Result<Self> {
-        let root = root.as_ref();
-        if !root.exists() {
-            Self::download(root)?;
+    pub fn prepare_data<P: AsRef<Path>>(root: P) -> anyhow::Result<()> {
+        let path = root.as_ref().join("processed");
+        if path.exists() {
+            return Ok(());
+        } else {
+            create_dir_all(&path)?;
         }
-        Self::load(root, EdgeDirection::default())
-    }
-    pub fn download<P: AsRef<Path>>(root: P) -> anyhow::Result<()> {
-        // download file
-        let mut local_file = tempfile::tempfile()?;
-        let mut remote_file =
-            RemoteFile::with_pbar("https://linqs-data.soe.ucsc.edu/public/datasets/cora/cora.zip")?;
-        std::io::copy(&mut remote_file, &mut local_file)?;
-
-        // unzip
-        let path = root.as_ref().join("raw");
-        std::fs::create_dir_all(&path)?;
-
-        let mut archive = ZipArchive::new(local_file)?;
-        for name in ["cora/cora.content", "cora/cora.cites"] {
-            let filename = name.split('/').last().unwrap();
-            std::io::copy(
-                &mut archive.by_name(name)?,
-                &mut File::create(path.join(filename))?,
-            )?;
+        let files = download_and_extract(
+            "https://linqs-data.soe.ucsc.edu/public/datasets/cora/cora.zip",
+            &["cora/cora.content", "cora/cora.cites"],
+            root.as_ref().join("raw"),
+        )?;
+        let e = || anyhow::anyhow!("Exhausted Iterator");
+        {
+            let reader = BufReader::new(File::open(&files[1])?);
+            let mut source = Vec::new();
+            let mut target = Vec::new();
+            for buf in reader.lines() {
+                let line = buf.unwrap();
+                let mut iter = line.split_whitespace();
+                source.push(iter.next().ok_or_else(e)?.parse::<u32>()?);
+                target.push(iter.next().ok_or_else(e)?.parse::<u32>()?);
+                assert!(iter.next().is_none());
+            }
+            let mut edge_df = df! {
+                "source" => source,
+                "target" => target,
+            }?;
+            ParquetWriter::new(File::create(path.join("edges.parquet"))?).finish(&mut edge_df)?;
+        }
+        {
+            let reader = BufReader::new(File::open(&files[0])?);
+            let mut id = Vec::new();
+            let mut xs = vec![Vec::new(); 1433];
+            let mut label = Vec::new();
+            for buf in reader.lines() {
+                let line = buf?;
+                let mut iter = line.split_whitespace();
+                id.push(iter.next().ok_or_else(e)?.parse::<u32>()?);
+                for xs_i in xs.iter_mut() {
+                    xs_i.push(iter.next().ok_or_else(e)?.parse::<f32>()?);
+                }
+                label.push(iter.next().ok_or_else(e)?.to_owned());
+                assert!(iter.next().is_none());
+            }
+            let mut node_df = df! {
+                "id" => id.clone(),
+                "label" => label,
+            }?;
+            for (i, x) in xs.into_iter().enumerate() {
+                let name = format!("xs.{}", i);
+                node_df.with_column(Series::from_vec(&name, x))?;
+            }
+            ParquetWriter::new(File::create(path.join("nodes.parquet"))?).finish(&mut node_df)?;
         }
         Ok(())
     }
-    pub fn load<P: AsRef<Path>>(root: P, edge_direction: EdgeDirection) -> anyhow::Result<Self> {
-        // read endpoints
-        let reader = BufReader::new(File::open(root.as_ref().join("raw").join("cora.cites"))?);
-        let mut source = Vec::new();
-        let mut target = Vec::new();
-        for buf in reader.lines() {
-            let line = buf?;
-            let mut iter = line.split_whitespace();
-            let u: u32 = iter.next().unwrap().parse()?;
-            let v: u32 = iter.next().unwrap().parse()?;
 
-            if edge_direction.has_forward_edges() {
-                source.push(u);
-                target.push(v);
-            }
-            if edge_direction.has_reverse_edges() {
-                source.push(v);
-                target.push(u);
-            }
-            assert!(iter.next().is_none());
-        }
-        let edge_df = df! {
-            "source" => source,
-            "target" => target,
-        }?;
+    pub fn from_processed<P: AsRef<Path>>(root: P) -> anyhow::Result<Self> {
+        let path = root.as_ref().join("processed");
+        let mut node_df = ParquetReader::new(File::open(path.join("nodes.parquet"))?).finish()?;
+        let mut edge_df = ParquetReader::new(File::open(path.join("edges.parquet"))?).finish()?;
 
-        // read features and labels
-        let reader = BufReader::new(File::open(root.as_ref().join("raw").join("cora.content"))?);
-        let mut id = Vec::new();
-        let mut xs = vec![Vec::new(); 1433];
-        let mut label = Vec::new();
+        // assign u32 label
+        let label = DataFrame::new(vec![node_df["label"].unique_stable()?])?
+            .with_row_count("label_u32", None)?;
+        node_df = node_df.inner_join(&label, ["label"], ["label"])?;
 
-        for buf in reader.lines() {
-            let line = buf?;
-            let mut iter = line.split_whitespace();
-            let u: u32 = iter.next().unwrap().parse()?;
-            for xs_i in xs.iter_mut() {
-                let x: f32 = iter.next().unwrap().parse()?;
-                xs_i.push(x);
-            }
-            let y = iter.next().unwrap().to_owned();
-            id.push(u);
-            label.push(y);
-            assert!(iter.next().is_none());
-        }
-        let mut node_df = df! {
-            "id" => id.clone(),
-            "label" => label,
-            "mask" => vec![true; id.len()],
-        }?;
-        let mut feature_cols = Vec::new();
-        for (i, x) in xs.into_iter().enumerate() {
-            let name = format!("xs[{}]", i);
-            node_df.with_column(Series::from_vec(&name, x))?;
-            feature_cols.push(name);
-        }
-        let label =
-            df! { "label" => node_df["label"].unique()? }?.with_row_count("label_u32", None)?;
-        let node_df = node_df.inner_join(&label, ["label"], ["label"])?;
-        Ok(Self {
-            node_df,
-            edge_df,
-            feature_cols,
-        })
+        // assign mask
+        node_df.with_column(BooleanChunked::full("mask", true, node_df.height()))?;
+
+        // make undirectional
+        let mut rev_edge_df = edge_df.clone();
+        rev_edge_df.replace("source", edge_df["target"].clone())?;
+        rev_edge_df.replace("target", edge_df["source"].clone())?;
+        edge_df = edge_df.vstack(&rev_edge_df)?;
+        Ok(Self { node_df, edge_df })
+    }
+
+    pub fn new<P: AsRef<Path>>(root: P) -> anyhow::Result<Self> {
+        let root = root.as_ref();
+        Self::prepare_data(root)?;
+        Self::from_processed(root)
+    }
+    pub fn feature_cols(&self) -> Vec<String> {
+        (0..self.num_features())
+            .map(|i| format!("xs.{}", i))
+            .collect()
     }
     pub fn num_features(&self) -> usize {
-        self.feature_cols.len()
+        1433
     }
     pub fn num_classes(&self) -> usize {
         7
-    }
-    pub fn node_df(&self) -> &DataFrame {
-        &self.node_df
-    }
-    pub fn edge_df(&self) -> &DataFrame {
-        &self.edge_df
     }
     fn id_cols(&self) -> &[&str] {
         &["id"]
     }
 }
 
-impl<const N: usize> RandomSplit<[f32; N]> for CoraDataset {
-    type Output = [CoraDataset; N];
-    fn random_split(&self, ratio: [f32; N]) -> Result<Self::Output> {
-        let n = self.node_df.height();
-        let score = Float32Chunked::rand_uniform("rand", n, 0.0, 1.0);
-        let mut cumsum = 0.0;
-
-        let mut result = Vec::new();
-        for f in ratio.into_iter() {
-            let mask = score.gt_eq(cumsum).bitand(score.lt(cumsum + f));
-            cumsum += f;
-
-            let mut node_df = self.node_df.clone();
-            node_df.replace_or_add("mask", node_df["mask"].bool()?.bitand(&mask))?;
-            result.push(Self {
-                node_df,
-                edge_df: self.edge_df.clone(),
-                feature_cols: self.feature_cols.clone(),
-            });
+impl PolarsDataset for CoraDataset {
+    fn node_df(&self) -> &DataFrame {
+        &self.node_df
+    }
+    fn edge_df(&self) -> &DataFrame {
+        &self.edge_df
+    }
+    fn with_node_df(&self, node_df: DataFrame) -> Self {
+        Self {
+            node_df,
+            edge_df: self.edge_df.clone(),
         }
-        match result.try_into() {
-            Ok(result) => Ok(result),
-            Err(e) => Err(anyhow::anyhow!("err")),
+    }
+    fn with_edge_df(&self, edge_df: DataFrame) -> Self {
+        Self {
+            node_df: self.node_df.clone(),
+            edge_df,
         }
     }
 }
@@ -205,10 +167,10 @@ impl Dataset for CoraDataset {
 
         let node_df = index.inner_join(&self.node_df, ["id"], ["id"])?;
         let mut xs = Vec::new();
-        for col in node_df.select_series(&self.feature_cols)? {
+        for col in node_df.select_series(self.feature_cols())? {
             xs.extend(col.f32()?.into_no_null_iter());
         }
-        let xs = Tensor::from_vec(xs, (node_df.height(), self.feature_cols.len()), device)?;
+        let xs = Tensor::from_vec(xs, (node_df.height(), self.num_features()), device)?;
 
         let edge_df = self
             .edge_df
