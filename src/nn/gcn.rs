@@ -1,5 +1,5 @@
-use candle_core::{IndexOp, Result, Tensor};
-use candle_nn::{Activation, Dropout, Init, Linear, Module, VarBuilder};
+use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use candle_nn::{Activation, Dropout, Init, Linear, Module, VarBuilder, VarMap};
 
 use super::{
     traits::GnnModule,
@@ -28,13 +28,13 @@ impl GcnConv {
 }
 impl GnnModule for GcnConv {
     fn forward_t(&self, xs: &Tensor, edge_index: &Tensor, _train: bool) -> Result<Tensor> {
-        let out_degree = out_degree(edge_index)?;
-        let in_degree = in_degree(edge_index)?;
+        let out_degree = out_degree(edge_index)?.maximum(1u32)?;
+        let in_degree = in_degree(edge_index)?.maximum(1u32)?;
         let edge_weight = out_degree
             .i(&edge_index.i((0, ..))?)?
             .mul(&in_degree.i(&edge_index.i((1, ..))?)?)?
             .to_dtype(xs.dtype())?
-            .powf(0.5)?;
+            .powf(-0.5)?;
         let xs = xs.matmul(&self.weight)?;
         weighted_sum_agg(&xs, edge_index, &edge_weight, &xs)?.broadcast_add(&self.bias)
     }
@@ -55,26 +55,33 @@ pub struct Gcn {
     layers: Vec<GcnConv>,
     dropout: Dropout,
     activation_fn: Activation,
+    varmap: VarMap,
 }
 impl Gcn {
-    pub fn with_params(layer_sizes: &[usize], params: GcnParams, vs: VarBuilder) -> Result<Self> {
+    pub fn with_params(layer_sizes: &[usize], params: GcnParams, device: &Device) -> Result<Self> {
+        let varmap = VarMap::new();
+        let vs = VarBuilder::from_varmap(&varmap, DType::F32, device);
+
         let mut layers = Vec::new();
         for i in 0..layer_sizes.len() - 1 {
-            let name = format!("layer_{}", i);
             layers.push(GcnConv::new(
                 layer_sizes[i],
                 layer_sizes[i + 1],
-                vs.pp(name),
+                vs.pp(i.to_string()),
             )?);
         }
         Ok(Self {
             layers,
             dropout: Dropout::new(params.dropout_rate),
             activation_fn: params.activation_fn,
+            varmap,
         })
     }
-    pub fn new(layer_sizes: &[usize], vs: VarBuilder) -> Result<Self> {
-        Self::with_params(layer_sizes, GcnParams::default(), vs)
+    pub fn new(layer_sizes: &[usize], device: &Device) -> Result<Self> {
+        Self::with_params(layer_sizes, GcnParams::default(), device)
+    }
+    pub fn parameters(&self) -> Vec<candle_core::Var> {
+        self.varmap.all_vars()
     }
 }
 impl GnnModule for Gcn {

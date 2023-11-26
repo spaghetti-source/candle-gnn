@@ -101,7 +101,8 @@ pub fn weighted_sum_agg(
 ) -> Result<Tensor> {
     out.index_add(
         &edge_index.i((0, ..))?,
-        &xs.i(&edge_index.i((1, ..))?.broadcast_mul(weight)?)?,
+        &xs.i(&edge_index.i((1, ..))?)?
+            .broadcast_mul(&weight.unsqueeze(1)?)?,
         0,
     )
 }

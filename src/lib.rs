@@ -2,7 +2,6 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
-
 pub mod datasets;
 pub mod nn;
 pub mod utils;
@@ -11,4 +10,3 @@ pub mod utils;
 mod tests {
     use super::*;
 }
-

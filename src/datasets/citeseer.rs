@@ -8,53 +8,28 @@ use std::{
 use ::zip::ZipArchive;
 use anyhow::Result;
 use candle_core::{Device, Tensor};
-use polars::prelude::{
-    df, ChunkCompare, DataFrame, DataFrameJoinOps, Float32Chunked, NamedFrom, NamedFromOwned,
-    Series,
-};
+use polars::prelude::*;
 
-use super::utils::RemoteFile;
 use super::{traits::Dataset, RandomSplit};
+use super::{utils::RemoteFile, EdgeDirection};
 
 #[derive(Debug, Clone)]
-pub struct CoraBatch {
+pub struct CiteSeerBatch {
     pub xs: Tensor,
     pub edge_index: Tensor,
     pub ys: Tensor,
     pub mask: Tensor, // loss(&logits.i(mask)?, &ys)
 }
 
-#[derive(Copy, Clone, Debug, Default)]
-pub enum EdgeDirection {
-    Forward,
-    Reverse,
-    #[default]
-    Both,
-}
-impl EdgeDirection {
-    pub fn has_forward_edges(&self) -> bool {
-        match self {
-            EdgeDirection::Forward => true,
-            EdgeDirection::Reverse => false,
-            EdgeDirection::Both => true,
-        }
-    }
-    pub fn has_reverse_edges(&self) -> bool {
-        match self {
-            EdgeDirection::Forward => true,
-            EdgeDirection::Reverse => false,
-            EdgeDirection::Both => true,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
-pub struct CoraDataset {
+pub struct CiteSeerDataset {
+    pub num_features: usize,
+    pub num_classes: usize,
     node_df: DataFrame,
     feature_cols: Vec<String>,
     edge_df: DataFrame,
 }
-impl CoraDataset {
+impl CiteSeerDataset {
     pub fn new<P: AsRef<Path>>(root: P) -> anyhow::Result<Self> {
         let root = root.as_ref();
         if !root.exists() {
@@ -66,7 +41,7 @@ impl CoraDataset {
         // download file
         let mut local_file = tempfile::tempfile()?;
         let mut remote_file =
-            RemoteFile::with_pbar("https://linqs-data.soe.ucsc.edu/public/datasets/cora/cora.zip")?;
+            RemoteFile::with_pbar("https://linqs-data.soe.ucsc.edu/public/lbc/citeseer.zip")?;
         std::io::copy(&mut remote_file, &mut local_file)?;
 
         // unzip
@@ -74,7 +49,7 @@ impl CoraDataset {
         std::fs::create_dir_all(&path)?;
 
         let mut archive = ZipArchive::new(local_file)?;
-        for name in ["cora/cora.content", "cora/cora.cites"] {
+        for name in ["citeseer/citeseer.content", "citeseer/citeseer.cites"] {
             let filename = name.split('/').last().unwrap();
             std::io::copy(
                 &mut archive.by_name(name)?,
@@ -143,16 +118,12 @@ impl CoraDataset {
             df! { "label" => node_df["label"].unique()? }?.with_row_count("label_u32", None)?;
         let node_df = node_df.inner_join(&label, ["label"], ["label"])?;
         Ok(Self {
+            num_features: 1433,
+            num_classes: 7,
             node_df,
             edge_df,
             feature_cols,
         })
-    }
-    pub fn num_features(&self) -> usize {
-        self.feature_cols.len()
-    }
-    pub fn num_classes(&self) -> usize {
-        7
     }
     pub fn node_df(&self) -> &DataFrame {
         &self.node_df
@@ -165,8 +136,8 @@ impl CoraDataset {
     }
 }
 
-impl<const N: usize> RandomSplit<[f32; N]> for CoraDataset {
-    type Output = [CoraDataset; N];
+impl<const N: usize> RandomSplit<[f32; N]> for CiteSeerDataset {
+    type Output = [CiteSeerDataset; N];
     fn random_split(&self, ratio: [f32; N]) -> Result<Self::Output> {
         let n = self.node_df.height();
         let score = Float32Chunked::rand_uniform("rand", n, 0.0, 1.0);
@@ -182,6 +153,8 @@ impl<const N: usize> RandomSplit<[f32; N]> for CoraDataset {
             result.push(Self {
                 node_df,
                 edge_df: self.edge_df.clone(),
+                num_features: self.num_features,
+                num_classes: self.num_classes,
                 feature_cols: self.feature_cols.clone(),
             });
         }
@@ -192,15 +165,15 @@ impl<const N: usize> RandomSplit<[f32; N]> for CoraDataset {
     }
 }
 
-impl Dataset for CoraDataset {
-    type Batch = CoraBatch;
+impl Dataset for CiteSeerDataset {
+    type Batch = CiteSeerBatch;
     type NodeSelector = DataFrame;
 
     fn all_nodes(&self) -> Result<DataFrame> {
         let result = self.node_df.select(self.id_cols())?;
         Ok(result)
     }
-    fn induced_subgraph(&self, nodes: DataFrame, device: &Device) -> Result<CoraBatch> {
+    fn induced_subgraph(&self, nodes: DataFrame, device: &Device) -> Result<CiteSeerBatch> {
         let index = nodes.with_row_count("__index", None)?;
 
         let node_df = index.inner_join(&self.node_df, ["id"], ["id"])?;
@@ -226,7 +199,7 @@ impl Dataset for CoraDataset {
         )?;
         let mask = Tensor::from_iter(masked_node_df["__index"].u32()?.into_no_null_iter(), device)?;
 
-        Ok(CoraBatch {
+        Ok(CiteSeerBatch {
             xs,
             edge_index,
             ys,

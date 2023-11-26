@@ -1,3 +1,4 @@
+/*
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(dead_code)]
@@ -113,3 +114,6 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+ */
+ fn main() { }
