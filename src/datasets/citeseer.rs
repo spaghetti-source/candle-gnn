@@ -16,8 +16,8 @@ use polars::{
     prelude::{df, DataFrame, DataFrameJoinOps, NamedFrom, NamedFromOwned, Series},
 };
 
-use super::traits::Dataset;
 use super::{download_and_extract, PolarsDataset};
+use super::{traits::Dataset, CompressionFormat};
 
 #[derive(Debug, Clone)]
 pub struct CiteSeerBatch {
@@ -28,65 +28,76 @@ pub struct CiteSeerBatch {
 }
 
 #[derive(Debug, Clone)]
-pub struct CiteseerDataset {
+pub struct CiteSeerDataset {
     node_df: DataFrame,
     edge_df: DataFrame,
 }
-impl CiteseerDataset {
+impl CiteSeerDataset {
+    const NUM_FEATURES: usize = 1433;
+    const NUM_CLASSES: usize = 6;
+    const NUM_NODES: usize = 3312;
+    const NUM_EDGES: usize = 4732;
+
     pub fn prepare_data<P: AsRef<Path>>(root: P) -> anyhow::Result<()> {
-        let path = root.as_ref().join("processed");
-        if path.exists() {
-            return Ok(());
-        } else {
-            create_dir_all(&path)?;
+        let raw = root.as_ref().join("raw");
+        if !raw.exists() {
+            create_dir_all(&raw)?;
+            download_and_extract(
+                "https://linqs-data.soe.ucsc.edu/public/lbc/citeseer.tgz",
+                &raw,
+                CompressionFormat::Tgz,
+            )?;
         }
-        let files = download_and_extract(
-            "https://linqs-data.soe.ucsc.edu/public/lbc/citeseer",
-            &["citeseer/citeseer.content", "citeseer/citeseer.cites"],
-            root.as_ref().join("raw"),
-        )?;
-        let e = || anyhow::anyhow!("Exhausted Iterator");
-        {
-            let reader = BufReader::new(File::open(&files[1])?);
-            let mut source = Vec::new();
-            let mut target = Vec::new();
-            for buf in reader.lines() {
-                let line = buf.unwrap();
-                let mut iter = line.split_whitespace();
-                source.push(iter.next().ok_or_else(e)?.parse::<u32>()?);
-                target.push(iter.next().ok_or_else(e)?.parse::<u32>()?);
-                assert!(iter.next().is_none());
-            }
-            let mut edge_df = df! {
-                "source" => source,
-                "target" => target,
-            }?;
-            ParquetWriter::new(File::create(path.join("edges.parquet"))?).finish(&mut edge_df)?;
-        }
-        {
-            let reader = BufReader::new(File::open(&files[0])?);
-            let mut id = Vec::new();
-            let mut xs = vec![Vec::new(); 1433];
-            let mut label = Vec::new();
-            for buf in reader.lines() {
-                let line = buf?;
-                let mut iter = line.split_whitespace();
-                id.push(iter.next().ok_or_else(e)?.parse::<u32>()?);
-                for xs_i in xs.iter_mut() {
-                    xs_i.push(iter.next().ok_or_else(e)?.parse::<f32>()?);
+        let processed = root.as_ref().join("processed");
+        if !processed.exists() {
+            create_dir_all(&processed)?;
+            let e = || anyhow::anyhow!("Exhausted Iterator");
+            {
+                let reader = BufReader::new(File::open(raw.join("citeseer/citeseer.cites"))?);
+                let mut source = Vec::new();
+                let mut target = Vec::new();
+                for buf in reader.lines() {
+                    let line = buf.unwrap();
+                    let mut iter = line.split_whitespace();
+                    source.push(iter.next().ok_or_else(e)?.to_owned());
+                    target.push(iter.next().ok_or_else(e)?.to_owned());
+                    assert!(iter.next().is_none());
                 }
-                label.push(iter.next().ok_or_else(e)?.to_owned());
-                assert!(iter.next().is_none());
+                assert_eq!(source.len(), Self::NUM_EDGES);
+                let mut edge_df = df! {
+                    "source" => source,
+                    "target" => target,
+                }?;
+                ParquetWriter::new(File::create(processed.join("edges.parquet"))?)
+                    .finish(&mut edge_df)?;
             }
-            let mut node_df = df! {
-                "id" => id.clone(),
-                "label" => label,
-            }?;
-            for (i, x) in xs.into_iter().enumerate() {
-                let name = format!("xs.{}", i);
-                node_df.with_column(Series::from_vec(&name, x))?;
+            {
+                let reader = BufReader::new(File::open(raw.join("citeseer/citeseer.content"))?);
+                let mut id = Vec::new();
+                let mut xs = vec![Vec::new(); Self::NUM_FEATURES];
+                let mut label = Vec::new();
+                for buf in reader.lines() {
+                    let line = buf?;
+                    let mut iter = line.split_whitespace();
+                    id.push(iter.next().ok_or_else(e)?.to_owned());
+                    for xs_i in xs.iter_mut() {
+                        xs_i.push(iter.next().ok_or_else(e)?.parse::<f32>()?);
+                    }
+                    label.push(iter.next().ok_or_else(e)?.to_owned());
+                    assert!(iter.next().is_none());
+                }
+                assert_eq!(id.len(), Self::NUM_NODES);
+                let mut node_df = df! {
+                    "id" => id,
+                    "label" => label,
+                }?;
+                for (i, x) in xs.into_iter().enumerate() {
+                    let name = format!("xs.{}", i);
+                    node_df.with_column(Series::from_vec(&name, x))?;
+                }
+                ParquetWriter::new(File::create(processed.join("nodes.parquet"))?)
+                    .finish(&mut node_df)?;
             }
-            ParquetWriter::new(File::create(path.join("nodes.parquet"))?).finish(&mut node_df)?;
         }
         Ok(())
     }
@@ -123,17 +134,17 @@ impl CiteseerDataset {
             .collect()
     }
     pub fn num_features(&self) -> usize {
-        1433
+        Self::NUM_FEATURES
     }
     pub fn num_classes(&self) -> usize {
-        7
+        Self::NUM_CLASSES
     }
     fn id_cols(&self) -> &[&str] {
         &["id"]
     }
 }
 
-impl PolarsDataset for CiteseerDataset {
+impl PolarsDataset for CiteSeerDataset {
     fn node_df(&self) -> &DataFrame {
         &self.node_df
     }
@@ -154,7 +165,7 @@ impl PolarsDataset for CiteseerDataset {
     }
 }
 
-impl Dataset for CiteseerDataset {
+impl Dataset for CiteSeerDataset {
     type Batch = CiteSeerBatch;
     type NodeSelector = DataFrame;
 
@@ -162,7 +173,7 @@ impl Dataset for CiteseerDataset {
         let result = self.node_df.select(self.id_cols())?;
         Ok(result)
     }
-    fn induced_subgraph(&self, nodes: DataFrame, device: &Device) -> Result<CiteSeerBatch> {
+    fn induced_subgraph(&self, nodes: DataFrame, device: &Device) -> Result<Self::Batch> {
         let index = nodes.with_row_count("__index", None)?;
 
         let node_df = index.inner_join(&self.node_df, ["id"], ["id"])?;
@@ -188,7 +199,7 @@ impl Dataset for CiteseerDataset {
         )?;
         let mask = Tensor::from_iter(masked_node_df["__index"].u32()?.into_no_null_iter(), device)?;
 
-        Ok(CiteSeerBatch {
+        Ok(Self::Batch {
             xs,
             edge_index,
             ys,

@@ -1,10 +1,12 @@
 use std::{
-    fs::{create_dir_all, File},
-    path::{Path, PathBuf},
+    io::{Seek, SeekFrom},
+    path::Path,
 };
 
 use anyhow::Result;
+use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
+use tar::Archive;
 use zip::ZipArchive;
 
 #[allow(dead_code)]
@@ -61,25 +63,31 @@ impl std::io::Read for RemoteFile {
     }
 }
 
+pub enum CompressionFormat {
+    Zip,
+    Tgz,
+}
+
 pub fn download_and_extract<P: AsRef<Path>>(
     url: &str,
-    target_files: &[&str],
     path: P,
-) -> Result<Vec<PathBuf>> {
+    format: CompressionFormat,
+) -> Result<()> {
     let mut remote_file = RemoteFile::with_pbar(url)?;
     let mut archive = tempfile::tempfile()?;
     std::io::copy(&mut remote_file, &mut archive)?;
+    archive.seek(SeekFrom::Start(0))?;
 
-    let mut archive = ZipArchive::new(archive)?;
-    let mut result = Vec::new();
-    for &filename in target_files.iter() {
-        let local_path = path.as_ref().join(filename);
-        if let Some(p) = local_path.parent() {
-            create_dir_all(p)?;
+    match format {
+        CompressionFormat::Zip => {
+            let mut archive = ZipArchive::new(&archive)?;
+            archive.extract(path)?;
         }
-        let mut local_file = File::create(&local_path)?;
-        std::io::copy(&mut archive.by_name(filename)?, &mut local_file)?;
-        result.push(local_path);
+        CompressionFormat::Tgz => {
+            let tar = GzDecoder::new(&archive);
+            let mut archive = Archive::new(tar);
+            archive.unpack(path)?;
+        }
     }
-    Ok(result)
+    Ok(())
 }

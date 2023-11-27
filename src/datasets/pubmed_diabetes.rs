@@ -1,10 +1,11 @@
 use std::{
+    collections::HashMap,
     fs::{create_dir_all, File},
     io::{BufRead, BufReader},
     path::Path,
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use candle_core::{Device, Tensor};
 use polars::{
     chunked_array::ops::ChunkFull,
@@ -15,12 +16,13 @@ use polars::{
     },
     prelude::{df, DataFrame, DataFrameJoinOps, NamedFrom, NamedFromOwned, Series},
 };
+use regex::Regex;
 
 use super::{download_and_extract, PolarsDataset};
 use super::{traits::Dataset, CompressionFormat};
 
 #[derive(Debug, Clone)]
-pub struct CoraBatch {
+pub struct PubMedDiabetesBatch {
     pub xs: Tensor,
     pub edge_index: Tensor,
     pub ys: Tensor,
@@ -28,24 +30,24 @@ pub struct CoraBatch {
 }
 
 #[derive(Debug, Clone)]
-pub struct CoraDataset {
+pub struct PubMedDiabetesDataset {
     node_df: DataFrame,
     edge_df: DataFrame,
 }
-impl CoraDataset {
-    const NUM_FEATURES: usize = 1433;
-    const NUM_CLASSES: usize = 7;
-    const NUM_NODES: usize = 2708;
-    const NUM_EDGES: usize = 5429;
+impl PubMedDiabetesDataset {
+    const NUM_FEATURES: usize = 500;
+    const NUM_CLASSES: usize = 3;
+    const NUM_NODES: usize = 19717;
+    const NUM_EDGES: usize = 44338;
 
     pub fn prepare_data<P: AsRef<Path>>(root: P) -> anyhow::Result<()> {
         let raw = root.as_ref().join("raw");
         if !raw.exists() {
             create_dir_all(&raw)?;
             download_and_extract(
-                "https://linqs-data.soe.ucsc.edu/public/datasets/cora/cora.zip",
+                "https://linqs-data.soe.ucsc.edu/public/datasets/pubmed-diabetes/pubmed-diabetes.tar.gz",
                 &raw,
-                CompressionFormat::Zip,
+                CompressionFormat::Tgz,
             )?;
         }
         let processed = root.as_ref().join("processed");
@@ -53,15 +55,34 @@ impl CoraDataset {
             create_dir_all(&processed)?;
             let e = || anyhow::anyhow!("Exhausted Iterator");
             {
-                let reader = BufReader::new(File::open(raw.join("cora/cora.cites"))?);
+                let reader = BufReader::new(File::open(
+                    raw.join("pubmed-diabetes/data/Pubmed-Diabetes.DIRECTED.cites.tab"),
+                )?);
                 let mut source = Vec::new();
                 let mut target = Vec::new();
-                for buf in reader.lines() {
+                let mut lines_iter = reader.lines();
+                let _ = lines_iter.next().ok_or(anyhow!("failed to read header 1")); // header 1
+                let _ = lines_iter.next().ok_or(anyhow!("failed to read header 2")); // header 2
+
+                let regex = Regex::new(r"\d+\s+paper:(\d*)\s*\|\s*paper:(\d*)").unwrap();
+                for buf in lines_iter {
                     let line = buf.unwrap();
-                    let mut iter = line.split_whitespace();
-                    source.push(iter.next().ok_or_else(e)?.parse::<u32>()?);
-                    target.push(iter.next().ok_or_else(e)?.parse::<u32>()?);
-                    assert!(iter.next().is_none());
+                    if let Some(c) = regex.captures(&line) {
+                        let u = c
+                            .get(1)
+                            .ok_or(anyhow!(format!("failed to parse u; {:?}", c)))?
+                            .as_str()
+                            .parse::<u32>()?;
+                        let v = c
+                            .get(2)
+                            .ok_or(anyhow!(format!("failed to parse v; {:?}", c)))?
+                            .as_str()
+                            .parse::<u32>()?;
+                        source.push(u);
+                        target.push(v);
+                    } else {
+                        return Err(anyhow::anyhow!(format!("don't capture; {:?}", line)));
+                    }
                 }
                 assert_eq!(source.len(), Self::NUM_EDGES);
                 let mut edge_df = df! {
@@ -72,19 +93,60 @@ impl CoraDataset {
                     .finish(&mut edge_df)?;
             }
             {
-                let reader = BufReader::new(File::open(raw.join("cora/cora.content"))?);
+                let reader = BufReader::new(File::open(
+                    raw.join("pubmed-diabetes/data/Pubmed-Diabetes.NODE.paper.tab"),
+                )?);
                 let mut id = Vec::new();
-                let mut xs = vec![Vec::new(); Self::NUM_FEATURES];
+                let mut xs = vec![vec![0.0; Self::NUM_NODES]; Self::NUM_FEATURES];
                 let mut label = Vec::new();
-                for buf in reader.lines() {
-                    let line = buf?;
-                    let mut iter = line.split_whitespace();
-                    id.push(iter.next().ok_or_else(e)?.parse::<u32>()?);
-                    for xs_i in xs.iter_mut() {
-                        xs_i.push(iter.next().ok_or_else(e)?.parse::<f32>()?);
+
+                let mut lines_iter = reader.lines();
+                let _ = lines_iter.next().ok_or_else(e)?; // header 1
+
+                let mut feature_idx = HashMap::new();
+                let header = lines_iter.next().ok_or_else(e)??; // header 2
+                let mut entries = header.split_whitespace();
+                assert_eq!(entries.next(), Some("cat=1,2,3:label")); // discard first element
+                let regex = Regex::new(r"numeric:(.*):(.*)").unwrap();
+
+                for (idx, entry) in entries.enumerate() {
+                    if let Some(c) = regex.captures(entry) {
+                        let key = c.get(1).ok_or_else(e)?.as_str().to_owned();
+                        assert_eq!(c.get(2).ok_or_else(e)?.as_str(), "0.0");
+                        feature_idx.insert(key, idx);
                     }
-                    label.push(iter.next().ok_or_else(e)?.to_owned());
-                    assert!(iter.next().is_none());
+                }
+                assert_eq!(feature_idx.len(), Self::NUM_FEATURES);
+
+                let regex = Regex::new(r"([^\s=]+)=([\d|.]+)").unwrap();
+                for (rank, buf) in lines_iter.enumerate() {
+                    let line = buf?;
+                    let mut entries = line.split_whitespace();
+                    id.push(entries.next().ok_or_else(e)?.parse::<u32>()?);
+                    let entry = entries.next().ok_or_else(e)?;
+                    if let Some(c) = regex.captures(entry) {
+                        assert_eq!(c.get(1).map(|m| m.as_str()), Some("label"));
+                        label.push(
+                            c.get(2)
+                                .ok_or(anyhow!(format!("failed to parse {:?}", c)))?
+                                .as_str()
+                                .to_owned(),
+                        );
+                    }
+                    for entry in entries {
+                        if let Some(c) = regex.captures(entry) {
+                            let key = c
+                                .get(1)
+                                .ok_or(anyhow!(format!("failed to parse {:?}", c)))?
+                                .as_str();
+                            let val = c
+                                .get(2)
+                                .ok_or(anyhow!(format!("failed to parse {:?}", c)))?
+                                .as_str()
+                                .parse::<f32>()?;
+                            xs[feature_idx[key]][rank] = val;
+                        }
+                    }
                 }
                 assert_eq!(id.len(), Self::NUM_NODES);
                 let mut node_df = df! {
@@ -144,7 +206,7 @@ impl CoraDataset {
     }
 }
 
-impl PolarsDataset for CoraDataset {
+impl PolarsDataset for PubMedDiabetesDataset {
     fn node_df(&self) -> &DataFrame {
         &self.node_df
     }
@@ -165,8 +227,8 @@ impl PolarsDataset for CoraDataset {
     }
 }
 
-impl Dataset for CoraDataset {
-    type Batch = CoraBatch;
+impl Dataset for PubMedDiabetesDataset {
+    type Batch = PubMedDiabetesBatch;
     type NodeSelector = DataFrame;
 
     fn all_nodes(&self) -> Result<DataFrame> {

@@ -11,10 +11,6 @@ pub trait Dataset {
     fn induced_subgraph(&self, nodes: Self::NodeSelector, device: &Device) -> Result<Self::Batch>;
 }
 
-pub trait NewFromDataset<T> {
-    fn new(dataset: T, device: Device) -> Self;
-}
-
 pub trait RandomSplit<Ratio> {
     type Output;
     fn random_split(&self, ratio: Ratio) -> Result<Self::Output>;
